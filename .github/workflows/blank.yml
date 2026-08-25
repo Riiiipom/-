@@ -15,12 +15,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Install Python packages
         run: |
-          python -m pip install --upgrade pip
           pip install requests beautifulsoup4
 
       - name: Check Eplus
@@ -31,91 +28,118 @@ jobs:
           import json
           import os
           import re
-          import subprocess
-          from pathlib import Path
-          from datetime import datetime, timezone
-
           import requests
+          from pathlib import Path
           from bs4 import BeautifulSoup
 
-          # ==============================
-          # 監視するイープラスのページ
-          # ==============================
-
-          BASE_URL = "https://eplus.jp/sf/detail/4540050001-P0030{num:02d}"
-
-          # 現在の前期分を中心に監視。
-          # 後から狙う日だけに絞ることもできます。
-          PAGE_NUMBERS = range(1, 33)
-
+          URL = "https://eplus.jp/sf/detail/4540050001-P0030002"
           TOPIC = os.environ["NTFY_TOPIC"]
           STATE_FILE = Path("eplus_state.json")
+
+          TARGET_TIMES = [
+              "10:00",
+              "10:30",
+              "11:00",
+              "11:30",
+              "12:00",
+              "12:30",
+              "13:00",
+              "13:30",
+              "14:00",
+              "14:30",
+              "15:00",
+              "15:30",
+              "16:00",
+          ]
+
+          STATUSES = [
+              "受付中",
+              "予定枚数終了",
+              "受付前",
+              "受付終了",
+          ]
 
           headers = {
               "User-Agent": (
                   "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) "
-                  "AppleWebKit/605.1.15 Version/18.7 Mobile/15E148 Safari/604.1"
-              )
+                  "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                  "Version/18.7 Mobile/15E148 Safari/604.1"
+              ),
+              "Accept-Language": "ja-JP,ja;q=0.9",
           }
+
+          print("イープラスを確認しています...")
+          print(URL)
+
+          response = requests.get(
+              URL,
+              headers=headers,
+              timeout=30
+          )
+
+          print("HTTP:", response.status_code)
+
+          response.raise_for_status()
+
+          soup = BeautifulSoup(response.text, "html.parser")
+
+          lines = [
+              line.strip()
+              for line in soup.get_text("\n").splitlines()
+              if line.strip()
+          ]
 
           current = {}
 
-          for num in PAGE_NUMBERS:
-              url = BASE_URL.format(num=num)
+          for time in TARGET_TIMES:
 
-              try:
-                  r = requests.get(
-                      url,
-                      headers=headers,
-                      timeout=20
-                  )
+              target = f"入場回：{time}～"
 
-                  if r.status_code != 200:
-                      print(f"SKIP {num}: HTTP {r.status_code}")
+              for i, line in enumerate(lines):
+
+                  if target not in line:
                       continue
 
-                  soup = BeautifulSoup(r.text, "html.parser")
-                  text = soup.get_text("\n", strip=True)
+                  # この入場回の後ろにある販売状況を探す
+                  status = None
 
-                  # ページ内の日時＋販売状況を拾う
-                  date_matches = re.findall(
-                      r"2026/\d{1,2}/\d{1,2}\([^)]+\).*?入場回：\d{1,2}:\d{2}～",
-                      text
-                  )
+                  for next_line in lines[i:i+25]:
 
-                  # 状態だけを抽出
-                  statuses = re.findall(
-                      r"(受付中|予定枚数終了|受付前|受付終了)",
-                      text
-                  )
+                      if next_line in STATUSES:
+                          status = next_line
+                          break
 
-                  # 先着販売の状態を中心に保存
-                  for i, status in enumerate(statuses):
-                      if status not in ("受付中", "予定枚数終了"):
-                          continue
+                  if status:
+                      current[time] = status
+                      print(f"{time} → {status}")
+                  else:
+                      print(f"{time} → 状態を取得できませんでした")
 
-                      key = f"page{num}-status{i}"
-                      current[key] = {
-                          "status": status,
-                          "url": url
-                      }
+                  break
 
-              except Exception as e:
-                  print(f"ERROR {num}: {e}")
+          print()
+          print("取得した状態数:", len(current))
 
-          print(f"取得した状態数: {len(current)}")
+          # 状態が1つも取れなかった場合は、
+          # 誤判定を防ぐため通知・保存をしない
+          if not current:
+              raise RuntimeError(
+                  "10/31のチケット状態を取得できませんでした"
+              )
 
-          # ==============================
-          # 初回は「現在の状態」を記録するだけ
-          # ==============================
-
+          # 初回
           if not STATE_FILE.exists():
+
               STATE_FILE.write_text(
-                  json.dumps(current, ensure_ascii=False, indent=2),
+                  json.dumps(
+                      current,
+                      ensure_ascii=False,
+                      indent=2
+                  ),
                   encoding="utf-8"
               )
 
-              print("初回監視です。現在の状態を保存しました。")
+              print("初回監視。現在の状態を保存しました。")
               raise SystemExit(0)
 
           old = json.loads(
@@ -124,48 +148,53 @@ jobs:
 
           recovered = []
 
-          for key, item in current.items():
-              old_item = old.get(key)
+          for time in TARGET_TIMES:
+
+              old_status = old.get(time)
+              new_status = current.get(time)
 
               if (
-                  old_item
-                  and old_item.get("status") == "予定枚数終了"
-                  and item.get("status") == "受付中"
+                  old_status == "予定枚数終了"
+                  and new_status == "受付中"
               ):
-                  recovered.append(item)
+                  recovered.append(time)
 
-          # 状態を更新
+          # 状態保存
           STATE_FILE.write_text(
-              json.dumps(current, ensure_ascii=False, indent=2),
+              json.dumps(
+                  current,
+                  ensure_ascii=False,
+                  indent=2
+              ),
               encoding="utf-8"
           )
 
-          # ==============================
-          # 復活したらntfy通知
-          # ==============================
-
+          # 復活通知
           if recovered:
+
               message = (
                   "🚨🚨 ハイキュー!!展 チケット復活！！ 🚨🚨\n\n"
-                  f"{len(recovered)}件のチケットが\n"
-                  "「予定枚数終了」→「受付中」に変わった可能性があります！\n\n"
+                  "2026年10月31日(土)\n\n"
                   + "\n".join(
-                      item["url"] for item in recovered
+                      f"🎫 {time}〜"
+                      for time in recovered
                   )
+                  + "\n\n"
+                  + URL
               )
 
               requests.post(
                   f"https://ntfy.sh/{TOPIC}",
                   data=message.encode("utf-8"),
                   headers={
-                      "Title": "🚨 ハイキュー!!展 チケット復活！！",
+                      "Title": "🚨 ハイキュー!!展 チケット復活！",
                       "Priority": "urgent",
                       "Tags": "rotating_light,ticket"
                   },
                   timeout=20
               )
 
-              print("🚨 復活を検知して通知しました！")
+              print("🚨 チケット復活を通知しました！")
 
           else:
               print("変化なし。")
