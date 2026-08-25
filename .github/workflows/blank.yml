@@ -1,18 +1,187 @@
-name: Ntfy Test
+name: Eplus Haikyu Ticket Monitor
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
 
 jobs:
-  test:
+  monitor:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Send test notification
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Python packages
         run: |
-          curl \
-            -H "Title: 🚨 ハイキュー!!展テスト通知" \
-            -H "Priority: urgent" \
-            -H "Tags: warning" \
-            -d "通知テスト成功！！🎉 GitHubからiPhoneに届いています！" \
-            https://ntfy.sh/eplus-haikyu-EM-84729163
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4
+
+      - name: Check Eplus
+        env:
+          NTFY_TOPIC: eplus-haikyu-EM-84729163
+        run: |
+          python <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+          from datetime import datetime, timezone
+
+          import requests
+          from bs4 import BeautifulSoup
+
+          # ==============================
+          # 監視するイープラスのページ
+          # ==============================
+
+          BASE_URL = "https://eplus.jp/sf/detail/4540050001-P0030{num:02d}"
+
+          # 現在の前期分を中心に監視。
+          # 後から狙う日だけに絞ることもできます。
+          PAGE_NUMBERS = range(1, 33)
+
+          TOPIC = os.environ["NTFY_TOPIC"]
+          STATE_FILE = Path("eplus_state.json")
+
+          headers = {
+              "User-Agent": (
+                  "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) "
+                  "AppleWebKit/605.1.15 Version/18.7 Mobile/15E148 Safari/604.1"
+              )
+          }
+
+          current = {}
+
+          for num in PAGE_NUMBERS:
+              url = BASE_URL.format(num=num)
+
+              try:
+                  r = requests.get(
+                      url,
+                      headers=headers,
+                      timeout=20
+                  )
+
+                  if r.status_code != 200:
+                      print(f"SKIP {num}: HTTP {r.status_code}")
+                      continue
+
+                  soup = BeautifulSoup(r.text, "html.parser")
+                  text = soup.get_text("\n", strip=True)
+
+                  # ページ内の日時＋販売状況を拾う
+                  date_matches = re.findall(
+                      r"2026/\d{1,2}/\d{1,2}\([^)]+\).*?入場回：\d{1,2}:\d{2}～",
+                      text
+                  )
+
+                  # 状態だけを抽出
+                  statuses = re.findall(
+                      r"(受付中|予定枚数終了|受付前|受付終了)",
+                      text
+                  )
+
+                  # 先着販売の状態を中心に保存
+                  for i, status in enumerate(statuses):
+                      if status not in ("受付中", "予定枚数終了"):
+                          continue
+
+                      key = f"page{num}-status{i}"
+                      current[key] = {
+                          "status": status,
+                          "url": url
+                      }
+
+              except Exception as e:
+                  print(f"ERROR {num}: {e}")
+
+          print(f"取得した状態数: {len(current)}")
+
+          # ==============================
+          # 初回は「現在の状態」を記録するだけ
+          # ==============================
+
+          if not STATE_FILE.exists():
+              STATE_FILE.write_text(
+                  json.dumps(current, ensure_ascii=False, indent=2),
+                  encoding="utf-8"
+              )
+
+              print("初回監視です。現在の状態を保存しました。")
+              raise SystemExit(0)
+
+          old = json.loads(
+              STATE_FILE.read_text(encoding="utf-8")
+          )
+
+          recovered = []
+
+          for key, item in current.items():
+              old_item = old.get(key)
+
+              if (
+                  old_item
+                  and old_item.get("status") == "予定枚数終了"
+                  and item.get("status") == "受付中"
+              ):
+                  recovered.append(item)
+
+          # 状態を更新
+          STATE_FILE.write_text(
+              json.dumps(current, ensure_ascii=False, indent=2),
+              encoding="utf-8"
+          )
+
+          # ==============================
+          # 復活したらntfy通知
+          # ==============================
+
+          if recovered:
+              message = (
+                  "🚨🚨 ハイキュー!!展 チケット復活！！ 🚨🚨\n\n"
+                  f"{len(recovered)}件のチケットが\n"
+                  "「予定枚数終了」→「受付中」に変わった可能性があります！\n\n"
+                  + "\n".join(
+                      item["url"] for item in recovered
+                  )
+              )
+
+              requests.post(
+                  f"https://ntfy.sh/{TOPIC}",
+                  data=message.encode("utf-8"),
+                  headers={
+                      "Title": "🚨 ハイキュー!!展 チケット復活！！",
+                      "Priority": "urgent",
+                      "Tags": "rotating_light,ticket"
+                  },
+                  timeout=20
+              )
+
+              print("🚨 復活を検知して通知しました！")
+
+          else:
+              print("変化なし。")
+
+          PY
+
+      - name: Save state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add eplus_state.json
+
+          if git diff --cached --quiet; then
+            echo "状態に変更なし"
+          else
+            git commit -m "Update eplus ticket state"
+            git push
+          fi
