@@ -2,10 +2,9 @@ name: Eplus Haikyu Ticket Monitor
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/5 * * * *"
-
-permissions:
+  repository_dispatch:
+    types: [ticket_check]
+  permissions:
   contents: write
 
 jobs:
