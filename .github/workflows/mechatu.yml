@@ -17,8 +17,7 @@ jobs:
           from bs4 import BeautifulSoup
 
           URLS = {
-              "通常席": "https://sp.atom.eplus.jp/sys/main.jsp?prm=U=82:P2=456985:P5=0001:P3=0001:P21=001:P7=3:P6=001:P1=0003:P0=GGWC01:P55=//eplus.jp%2Fsf%2Fdetail%2F4569850001",
-              "見切れ席": "https://sp.atom.eplus.jp/sys/main.jsp?prm=U=82:P2=456985:P5=0001:P3=0001:P21=001:P7=2:P6=001:P1=0003:P0=GGWC01:P55=//eplus.jp%2Fsf%2Fdetail%2F4569850001"
+              "公演ページ": "https://eplus.jp/sf/detail/4569850001"
           }
 
           headers = {
