@@ -1,0 +1,67 @@
+name: MECHATU-A Ticket Monitor Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check eplus pages
+        run: |
+          pip install requests beautifulsoup4
+
+          python <<'PY'
+          import requests
+          from bs4 import BeautifulSoup
+
+          URLS = {
+              "通常席": "https://sp.atom.eplus.jp/sys/main.jsp?prm=U=82:P2=456985:P5=0001:P3=0001:P21=001:P7=3:P6=001:P1=0003:P0=GGWC01:P55=//eplus.jp%2Fsf%2Fdetail%2F4569850001",
+              "見切れ席": "https://sp.atom.eplus.jp/sys/main.jsp?prm=U=82:P2=456985:P5=0001:P3=0001:P21=001:P7=2:P6=001:P1=0003:P0=GGWC01:P55=//eplus.jp%2Fsf%2Fdetail%2F4569850001"
+          }
+
+          headers = {
+              "User-Agent": (
+                  "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) "
+                  "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                  "Version/18.7 Mobile/15E148 Safari/604.1"
+              ),
+              "Accept-Language": "ja-JP,ja;q=0.9",
+          }
+
+          for name, url in URLS.items():
+              print(f"\n===== {name} =====")
+              try:
+                  response = requests.get(
+                      url,
+                      headers=headers,
+                      timeout=30
+                  )
+                  print("HTTP:", response.status_code)
+                  print("最終URL:", response.url)
+
+                  response.raise_for_status()
+
+                  soup = BeautifulSoup(
+                      response.text,
+                      "html.parser"
+                  )
+
+                  text = soup.get_text(" ", strip=True)
+                  print("ページタイトル:", soup.title.get_text(strip=True)
+                        if soup.title else "なし")
+                  print("ページ文字数:", len(text))
+                  print("販売状況の文字:", [
+                      word for word in
+                      ["○", "△", "×", "受付中",
+                       "予定枚数終了", "同意", "エラー"]
+                      if word in text
+                  ])
+                  print("ページ本文の先頭:")
+                  print(text[:1500])
+
+              except Exception as e:
+                  print("取得失敗:", repr(e))
+
+          PY
