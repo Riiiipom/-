@@ -2,21 +2,42 @@ name: MECHATU-A Ticket Monitor
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mechatu-ticket-monitor
+  cancel-in-progress: false
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check eplus page
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check tickets and notify
+        env:
+          NTFY_TOPIC: eplus-haikyu-EM-84729163
         run: |
           pip install requests beautifulsoup4
 
           python <<'PY'
           import requests
+          import json
+          import os
+          import subprocess
           from bs4 import BeautifulSoup
 
-          url = "https://eplus.jp/sf/detail/4569850001"
+          URL = "https://eplus.jp/sf/detail/4569850001"
+          STATE_FILE = "mechatu_state.json"
+          TOPIC = os.environ["NTFY_TOPIC"]
 
           headers = {
               "User-Agent": (
@@ -27,23 +48,15 @@ jobs:
               "Accept-Language": "ja-JP,ja;q=0.9",
           }
 
-          response = requests.get(
-              url,
-              headers=headers,
-              timeout=30
-          )
+          response = requests.get(URL, headers=headers, timeout=30)
           print("HTTP:", response.status_code)
           response.raise_for_status()
 
           soup = BeautifulSoup(response.text, "html.parser")
           text = soup.get_text(" ", strip=True)
 
-          print("ページ取得成功")
-          print("一般発売の出現回数:", text.count("一般発売"))
-
           positions = []
           start = 0
-
           while True:
               pos = text.find("一般発売", start)
               if pos == -1:
@@ -51,8 +64,13 @@ jobs:
               positions.append(pos)
               start = pos + len("一般発売")
 
-          for i, pos in enumerate(positions):
-              before = text[max(0, pos - 100):pos]
+          if len(positions) < 2:
+              raise RuntimeError("席種の表示を2つ確認できません")
+
+          current = {}
+
+          for i, pos in enumerate(positions[:2]):
+              before = text[max(0, pos - 150):pos]
               end = positions[i + 1] if i + 1 < len(positions) else min(len(text), pos + 500)
               section = text[pos:end]
 
@@ -66,9 +84,57 @@ jobs:
               elif "予定枚数終了" in section:
                   status = "予定枚数終了"
               else:
-                  status = "判定できず"
+                  raise RuntimeError(f"{name}の販売状況を判定できません")
 
+              current[name] = status
               print(f"{name}: {status}")
-              print("確認用:", section[:250])
 
+          if set(current) != {"普通席", "見切れ席"}:
+              raise RuntimeError("席種を正しく識別できません")
+
+          if os.path.exists(STATE_FILE):
+              with open(STATE_FILE, encoding="utf-8") as f:
+                  previous = json.load(f)
+          else:
+              previous = None
+
+          if previous is None:
+              print("初回チェック：現在の状態を記録します")
+              changed = False
+          else:
+              changed = False
+              for name, status in current.items():
+                  old = previous.get(name)
+                  if old != "受付中" and status == "受付中":
+                      message = f"MECHATU-A {name}が受付中になったよ！\n{URL}"
+                      r = requests.post(
+                          f"https://ntfy.sh/{TOPIC}",
+                          data=message.encode("utf-8"),
+                          headers={"Title": "MECHATU-A チケット通知"},
+                          timeout=30
+                      )
+                      r.raise_for_status()
+                      print(f"{name}の通知を送信しました")
+                  if old != status:
+                      changed = True
+
+          if previous is None or changed:
+              with open(STATE_FILE, "w", encoding="utf-8") as f:
+                  json.dump(current, f, ensure_ascii=False, indent=2)
+
+              subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
+              subprocess.run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], check=True)
+              subprocess.run(["git", "add", STATE_FILE], check=True)
+
+              result = subprocess.run(
+                  ["git", "diff", "--cached", "--quiet"]
+              )
+              if result.returncode == 1:
+                  subprocess.run(
+                      ["git", "commit", "-m", "Update MECHATU-A ticket status"],
+                      check=True
+                  )
+                  subprocess.run(["git", "push"], check=True)
+
+          print("チェック完了")
           PY
