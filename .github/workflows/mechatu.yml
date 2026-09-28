@@ -1,4 +1,4 @@
-name: MECHATU-A Ticket Monitor Test
+name: MECHATU-A Ticket Monitor
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check eplus pages
+      - name: Check eplus page
         run: |
           pip install requests beautifulsoup4
 
@@ -16,9 +16,7 @@ jobs:
           import requests
           from bs4 import BeautifulSoup
 
-          URLS = {
-              "公演ページ": "https://eplus.jp/sf/detail/4569850001"
-          }
+          url = "https://eplus.jp/sf/detail/4569850001"
 
           headers = {
               "User-Agent": (
@@ -29,38 +27,48 @@ jobs:
               "Accept-Language": "ja-JP,ja;q=0.9",
           }
 
-          for name, url in URLS.items():
-              print(f"\n===== {name} =====")
-              try:
-                  response = requests.get(
-                      url,
-                      headers=headers,
-                      timeout=30
-                  )
-                  print("HTTP:", response.status_code)
-                  print("最終URL:", response.url)
+          response = requests.get(
+              url,
+              headers=headers,
+              timeout=30
+          )
+          print("HTTP:", response.status_code)
+          response.raise_for_status()
 
-                  response.raise_for_status()
+          soup = BeautifulSoup(response.text, "html.parser")
+          text = soup.get_text(" ", strip=True)
 
-                  soup = BeautifulSoup(
-                      response.text,
-                      "html.parser"
-                  )
+          print("ページ取得成功")
+          print("一般発売の出現回数:", text.count("一般発売"))
 
-                  text = soup.get_text(" ", strip=True)
-                  print("ページタイトル:", soup.title.get_text(strip=True)
-                        if soup.title else "なし")
-                  print("ページ文字数:", len(text))
-                  print("販売状況の文字:", [
-                      word for word in
-                      ["○", "△", "×", "受付中",
-                       "予定枚数終了", "同意", "エラー"]
-                      if word in text
-                  ])
-                  print("ページ本文の先頭:")
-                  print(text[:1500])
+          positions = []
+          start = 0
 
-              except Exception as e:
-                  print("取得失敗:", repr(e))
+          while True:
+              pos = text.find("一般発売", start)
+              if pos == -1:
+                  break
+              positions.append(pos)
+              start = pos + len("一般発売")
+
+          for i, pos in enumerate(positions):
+              before = text[max(0, pos - 100):pos]
+              end = positions[i + 1] if i + 1 < len(positions) else min(len(text), pos + 500)
+              section = text[pos:end]
+
+              if "見切れ席" in before:
+                  name = "見切れ席"
+              else:
+                  name = "普通席"
+
+              if "受付中" in section:
+                  status = "受付中"
+              elif "予定枚数終了" in section:
+                  status = "予定枚数終了"
+              else:
+                  status = "判定できず"
+
+              print(f"{name}: {status}")
+              print("確認用:", section[:250])
 
           PY
